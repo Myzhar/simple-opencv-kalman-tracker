@@ -12,15 +12,22 @@
 // Module "imgproc"
 #include <opencv2/imgproc/imgproc.hpp>
 
-// Module "video"
-#include <opencv2/video/video.hpp>
-
 // Output
 #include <iostream>
 
 // Vector
 #include <vector>
 
+// >>>>> BFL includes
+#include <bfl/filter/extendedkalmanfilter.h>
+#include <bfl/model/linearanalyticsystemmodel_gaussianuncertainty.h>
+#include <bfl/model/linearanalyticmeasurementmodel_gaussianuncertainty.h>
+
+#include <bfl/pdf/linearanalyticconditionalgaussian.h>
+// <<<<< BFL includes
+
+using namespace MatrixWrapper;
+using namespace BFL;
 using namespace std;
 
 // >>>>> Color to be tracked
@@ -28,6 +35,49 @@ using namespace std;
 #define MAX_H_BLUE 300
 // <<<<< Color to be tracked
 
+// >>>>> State defines
+#define _X      1
+#define _Y      2
+#define _Xdot   3
+#define _Ydot   4
+#define _W      5
+#define _H      6
+// <<<<< State defines
+
+// >>>>> Measures defines
+#define M_X      1
+#define M_Y      2
+#define M_W      3
+#define M_H      4
+// <<<<< Measures defines
+
+// >>>>> System Gaussian
+#define MU_SYSTEM_NOISE_X       3.0
+#define MU_SYSTEM_NOISE_Y       3.0
+#define MU_SYSTEM_NOISE_Xdot    1.0
+#define MU_SYSTEM_NOISE_Ydot    1.0
+#define MU_SYSTEM_NOISE_W       5.0
+#define MU_SYSTEM_NOISE_H       5.0
+
+#define SIGMA_SYSTEM_NOISE_X       1.0
+#define SIGMA_SYSTEM_NOISE_Y       1.0
+#define SIGMA_SYSTEM_NOISE_Xdot    2.0
+#define SIGMA_SYSTEM_NOISE_Ydot    2.0
+#define SIGMA_SYSTEM_NOISE_W       3.0
+#define SIGMA_SYSTEM_NOISE_H       3.0
+// <<<<< System Gaussian
+
+// >>>>> Measure Gaussian
+#define MU_MEAS_NOISE_X       3.0
+#define MU_MEAS_NOISE_Y       3.0
+#define MU_MEAS_NOISE_W       5.0
+#define MU_MEAS_NOISE_H       5.0
+
+#define SIGMA_MEAS_NOISE_X       1.0
+#define SIGMA_MEAS_NOISE_Y       1.0
+#define SIGMA_MEAS_NOISE_W       3.0
+#define SIGMA_MEAS_NOISE_H       3.0
+// <<<<< Measure Gaussian
 
 int main()
 {
@@ -39,52 +89,75 @@ int main()
     int measSize = 4;
     int contrSize = 0;
 
-    unsigned int type = CV_32F;
-    cv::KalmanFilter kf(stateSize, measSize, contrSize, type);
+    // >>>>> System Matrix
+    Matrix A(stateSize,stateSize);
+    A = 0.0;
+    for( int i=1; i<=stateSize; i++ )
+    {
+        A(i,i)=1.0;
+    }
+    // <<<<< System Matrix
 
-    cv::Mat state(stateSize, 1, type);  // [x,y,v_x,v_y,w,h]
-    cv::Mat meas(measSize, 1, type);    // [z_x,z_y,z_w,z_h]
-    //cv::Mat procNoise(stateSize, 1, type)
-    // [E_x,E_y,E_v_x,E_v_y,E_w,E_h]
+    // >>>>> System Noise
+    ColumnVector sysNoise_Mu(stateSize);
+    sysNoise_Mu(_X)     = MU_SYSTEM_NOISE_X; // X
+    sysNoise_Mu(_Y)     = MU_SYSTEM_NOISE_Y; // Y
+    sysNoise_Mu(_Xdot)  = MU_SYSTEM_NOISE_Xdot; // V_X
+    sysNoise_Mu(_Ydot)  = MU_SYSTEM_NOISE_Ydot; // V_Y
+    sysNoise_Mu(_W)     = MU_SYSTEM_NOISE_W; // W
+    sysNoise_Mu(_H)     = MU_SYSTEM_NOISE_H; // H
 
-    // Transition State Matrix A
-    // Note: set dT at each processing step!
-    // [ 1 0 dT 0  0 0 ]
-    // [ 0 1 0  dT 0 0 ]
-    // [ 0 0 1  0  0 0 ]
-    // [ 0 0 0  1  0 0 ]
-    // [ 0 0 0  0  1 0 ]
-    // [ 0 0 0  0  0 1 ]
-    cv::setIdentity(kf.transitionMatrix);
+    SymmetricMatrix sysNoise_Cov(stateSize);
+    sysNoise_Cov = 0.0;
+    sysNoise_Cov(_X,_X)       = SIGMA_SYSTEM_NOISE_X;
+    sysNoise_Cov(_Y,_Y)       = SIGMA_SYSTEM_NOISE_Y;
+    sysNoise_Cov(_Xdot,_Xdot) = SIGMA_SYSTEM_NOISE_Xdot;
+    sysNoise_Cov(_Ydot,_Ydot) = SIGMA_SYSTEM_NOISE_Ydot;
+    sysNoise_Cov(_W,_W)       = SIGMA_SYSTEM_NOISE_W;
+    sysNoise_Cov(_H,_H)       = SIGMA_SYSTEM_NOISE_H;
+    Gaussian system_Uncertainty(sysNoise_Mu, sysNoise_Cov);
+    // <<<<< System Noise
 
-    // Measure Matrix H
-    // [ 1 0 0 0 0 0 ]
-    // [ 0 1 0 0 0 0 ]
-    // [ 0 0 0 0 1 0 ]
-    // [ 0 0 0 0 0 1 ]
-    kf.measurementMatrix = cv::Mat::zeros(measSize, stateSize, type);
-    kf.measurementMatrix.at<float>(0) = 1.0f;
-    kf.measurementMatrix.at<float>(7) = 1.0f;
-    kf.measurementMatrix.at<float>(16) = 1.0f;
-    kf.measurementMatrix.at<float>(23) = 1.0f;
+    LinearAnalyticConditionalGaussian sys_pdf(A, system_Uncertainty);
+    LinearAnalyticSystemModelGaussianUncertainty sys_model(&sys_pdf);
 
-    // Process Noise Covariance Matrix Q
-    // [ Ex   0   0     0     0    0  ]
-    // [ 0    Ey  0     0     0    0  ]
-    // [ 0    0   Ev_x  0     0    0  ]
-    // [ 0    0   0     Ev_y  0    0  ]
-    // [ 0    0   0     0     Ew   0  ]
-    // [ 0    0   0     0     0    Eh ]
-    //cv::setIdentity(kf.processNoiseCov, cv::Scalar(1e-2));
-    kf.processNoiseCov.at<float>(0) = 1e-2;
-    kf.processNoiseCov.at<float>(7) = 1e-2;
-    kf.processNoiseCov.at<float>(14) = 5.0f;
-    kf.processNoiseCov.at<float>(21) = 5.0f;
-    kf.processNoiseCov.at<float>(28) = 1e-2;
-    kf.processNoiseCov.at<float>(35) = 1e-2;
+    // >>>>> Measures Matrix
+    Matrix H(measSize,stateSize);
+    H=0.0;
 
-    // Measures Noise Covariance Matrix R
-    cv::setIdentity(kf.measurementNoiseCov, cv::Scalar(1e-1));
+    // Speed is not measured, so the related lines are missing
+    /*[1 0 0 0 0 0 0]
+    [0 1 0 0 0 0 0]
+    [0 0 0 0 0 1 0]
+    [0 0 0 0 0 0 1]*/
+
+    int missing = 2;
+
+    H(_X,_X) = 1.0;
+    H(_Y,_Y) = 1.0;
+    H(_W-missing, _W) = 1.0;
+    H(_H-missing, _H) = 1.0;
+    // <<<<< Measures Matrix
+
+    // >>>>> Measures Noise
+    ColumnVector measNoise_Mu(measSize);
+    measNoise_Mu(M_X) = MU_MEAS_NOISE_X;
+    measNoise_Mu(M_X) = MU_MEAS_NOISE_Y;
+    measNoise_Mu(M_W) = MU_MEAS_NOISE_W;
+    measNoise_Mu(M_H) = MU_MEAS_NOISE_H;
+
+    SymmetricMatrix measNoise_Cov(measSize);
+    measNoise_Cov(M_X,M_X) = SIGMA_MEAS_NOISE_X;
+    measNoise_Cov(M_Y,M_Y) = SIGMA_MEAS_NOISE_Y;
+    measNoise_Cov(M_W,M_W) = SIGMA_MEAS_NOISE_W;
+    measNoise_Cov(M_H,M_H) = SIGMA_MEAS_NOISE_H;
+
+    Gaussian measurement_Uncertainty(measNoise_Mu, measNoise_Cov);
+
+    LinearAnalyticConditionalGaussian meas_pdf(H, measurement_Uncertainty);
+    LinearAnalyticMeasurementModelGaussianUncertainty meas_model(&meas_pdf);
+    // >>>>> Measures Noise
+
     // <<<< Kalman Filter
 
     // Camera Index
@@ -130,27 +203,27 @@ int main()
         if (found)
         {
             // >>>> Matrix A
-            kf.transitionMatrix.at<float>(2) = dT;
-            kf.transitionMatrix.at<float>(9) = dT;
+            //kf.transitionMatrix.at<float>(2) = dT;
+            //kf.transitionMatrix.at<float>(9) = dT;
             // <<<< Matrix A
 
-            cout << "dT:" << endl << dT << endl;
+            //cout << "dT:" << endl << dT << endl;
 
-            state = kf.predict();
-            cout << "State post:" << endl << state << endl;
+            //state = kf.predict();
+            //cout << "State post:" << endl << state << endl;
 
-            cv::Rect predRect;
-            predRect.width = state.at<float>(4);
-            predRect.height = state.at<float>(5);
-            predRect.x = state.at<float>(0) - predRect.width / 2;
-            predRect.y = state.at<float>(1) - predRect.height / 2;
+            //            cv::Rect predRect;
+            //            predRect.width = state.at<float>(4);
+            //            predRect.height = state.at<float>(5);
+            //            predRect.x = state.at<float>(0) - predRect.width / 2;
+            //            predRect.y = state.at<float>(1) - predRect.height / 2;
 
-            cv::Point center;
-            center.x = state.at<float>(0);
-            center.y = state.at<float>(1);
-            cv::circle(res, center, 2, CV_RGB(255,0,0), -1);
+            //            cv::Point center;
+            //            center.x = state.at<float>(0);
+            //            center.y = state.at<float>(1);
+            //            cv::circle(res, center, 2, CV_RGB(255,0,0), -1);
 
-            cv::rectangle(res, predRect, CV_RGB(255,0,0), 2);
+            //            cv::rectangle(res, predRect, CV_RGB(255,0,0), 2);
         }
 
         // >>>>> Noise smoothing
@@ -242,35 +315,35 @@ int main()
         {
             notFoundCount = 0;
 
-            meas.at<float>(0) = ballsBox[0].x + ballsBox[0].width / 2;
-            meas.at<float>(1) = ballsBox[0].y + ballsBox[0].height / 2;
-            meas.at<float>(2) = (float)ballsBox[0].width;
-            meas.at<float>(3) = (float)ballsBox[0].height;
+            //            meas.at<float>(0) = ballsBox[0].x + ballsBox[0].width / 2;
+            //            meas.at<float>(1) = ballsBox[0].y + ballsBox[0].height / 2;
+            //            meas.at<float>(2) = (float)ballsBox[0].width;
+            //            meas.at<float>(3) = (float)ballsBox[0].height;
 
-            if (!found) // First detection!
-            {
-                // >>>> Initialization
-                kf.errorCovPre.at<float>(0) = 1; // px
-                kf.errorCovPre.at<float>(7) = 1; // px
-                kf.errorCovPre.at<float>(14) = 1;
-                kf.errorCovPre.at<float>(21) = 1;
-                kf.errorCovPre.at<float>(28) = 1; // px
-                kf.errorCovPre.at<float>(35) = 1; // px
+            //            if (!found) // First detection!
+            //            {
+            //                // >>>> Initialization
+            //                kf.errorCovPre.at<float>(0) = 1; // px
+            //                kf.errorCovPre.at<float>(7) = 1; // px
+            //                kf.errorCovPre.at<float>(14) = 1;
+            //                kf.errorCovPre.at<float>(21) = 1;
+            //                kf.errorCovPre.at<float>(28) = 1; // px
+            //                kf.errorCovPre.at<float>(35) = 1; // px
 
-                state.at<float>(0) = meas.at<float>(0);
-                state.at<float>(1) = meas.at<float>(1);
-                state.at<float>(2) = 0;
-                state.at<float>(3) = 0;
-                state.at<float>(4) = meas.at<float>(2);
-                state.at<float>(5) = meas.at<float>(3);
-                // <<<< Initialization
+            //                state.at<float>(0) = meas.at<float>(0);
+            //                state.at<float>(1) = meas.at<float>(1);
+            //                state.at<float>(2) = 0;
+            //                state.at<float>(3) = 0;
+            //                state.at<float>(4) = meas.at<float>(2);
+            //                state.at<float>(5) = meas.at<float>(3);
+            //                // <<<< Initialization
 
-                found = true;
-            }
-            else
-                kf.correct(meas); // Kalman Correction
+            //                found = true;
+            //            }
+            //            else
+            //                kf.correct(meas); // Kalman Correction
 
-            cout << "Measure matrix:" << endl << meas << endl;
+            //            cout << "Measure matrix:" << endl << meas << endl;
         }
         // <<<<< Kalman Update
 
