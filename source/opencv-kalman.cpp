@@ -265,6 +265,8 @@ int main()
                 state.at<float>(5) = meas.at<float>(3);
                 // <<<< Initialization
 
+                kf.statePost = state;
+                
                 found = true;
             }
             else
